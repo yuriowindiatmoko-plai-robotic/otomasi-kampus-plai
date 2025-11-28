@@ -1,0 +1,6 @@
+selenium==4.15.2
+webdriver-manager==4.0.1
+pillow==10.1.0
+pytesseract==0.3.10
+requests==2.31.0
+tabula-py==2.8.2
