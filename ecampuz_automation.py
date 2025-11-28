@@ -383,6 +383,17 @@ class EcampuzAutomation:
                 f.write(div_html or 'No HTML content')
             print(f"Saved div HTML: {html_filename}")
 
+            # Enhanced captcha detection for distorted/visual captchas
+            print("Enhanced captcha detection for distorted text...")
+
+            # Try to extract the captcha area as an image for OCR processing
+            captcha_area_image = self._extract_captcha_area_as_image(div_element)
+            if captcha_area_image:
+                ocr_result = self._solve_captcha_multiple_methods(captcha_area_image)
+                if ocr_result and self._validate_captcha_text(ocr_result):
+                    print(f"✓ OCR successful: '{ocr_result}'")
+                    return ocr_result
+
             # Try to get background image
             bg_image = self.driver.execute_script(
                 """
@@ -394,7 +405,12 @@ class EcampuzAutomation:
                     backgroundColor: style.backgroundColor,
                     color: style.color,
                     fontSize: style.fontSize,
-                    fontFamily: style.fontFamily
+                    fontFamily: style.fontFamily,
+                    width: element.offsetWidth,
+                    height: element.offsetHeight,
+                    position: style.position,
+                    display: style.display,
+                    visibility: style.visibility
                 };
                 """, div_element
             )
@@ -434,13 +450,23 @@ class EcampuzAutomation:
                     return self._solve_captcha_multiple_methods(captcha_image)
 
             # Try to get text content of the div (for math captchas)
-            if div_text and len(div_text) >= 3:
+            if div_text and len(div_text) >= 1:
                 print(f"Found div text: '{div_text}'")
 
                 # Check if it's a math expression
                 if any(op in div_text for op in ['+', '-', '*', '=', '/', 'plus', 'minus', 'times']):
                     print("Detected math expression in div text")
                     return self._solve_math_expression_text(div_text)
+
+                # Check for distorted text patterns (mixed characters, special symbols)
+                distorted_pattern = r'[^a-zA-Z0-9\s]'  # Non-alphanumeric and non-space
+                if re.search(distorted_pattern, div_text):
+                    print("Detected potentially distorted text")
+                    # Try to clean distorted text
+                    cleaned_text = self._clean_distorted_text(div_text)
+                    if cleaned_text and self._validate_captcha_text(cleaned_text):
+                        print(f"Cleaned distorted text: '{cleaned_text}'")
+                        return cleaned_text
 
                 # Try to extract numbers
                 import re
@@ -468,7 +494,7 @@ class EcampuzAutomation:
                 "return arguments[0].innerText || arguments[0].textContent;", div_element
             )
 
-            if all_text and len(all_text.strip()) >= 3:
+            if all_text and len(all_text.strip()) >= 1:
                 print(f"Found all text in div: '{all_text}'")
                 return self._clean_captcha_text(all_text.strip())
 
@@ -1703,7 +1729,7 @@ class EcampuzAutomation:
         # Navigate to specific presensi URL
         presensi_url = "http://start.plai.ecampuz.com/eakademikportal/index.php?pModule=wtWoo6mboto=&pSub=08iflKeRpNiWqcqnpZ0=&pAct=0dWdoas=&kelas=k5NkY2diZJg=&smt=k5NmaGg="
         self.driver.get(presensi_url)
-        time.sleep(3)
+        time.sleep(5)  # Increased wait time
 
         try:
             # Click "Tampilkan" button if present
@@ -1711,39 +1737,132 @@ class EcampuzAutomation:
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Tampilkan') or contains(text(), 'Show')]"))
             )
             tampilkan_button.click()
-            time.sleep(2)
-        except:
-            print("Tampilkan button not found, continuing...")
+            time.sleep(3)
+            print("Tampilkan button clicked")
+        except Exception as e:
+            print(f"Tampilkan button not found: {e}")
 
         try:
-            # Find and click presensi link or download button
-            presensi_link = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '.pdf')] | //button[contains(text(), 'Download')] | //a[contains(text(), 'PDF')]"))
-            )
+            # Wait longer for page to load
+            print("Waiting for PDF links to load...")
+            time.sleep(5)
 
-            # Get the PDF URL
-            pdf_url = presensi_link.get_attribute('href')
-            if pdf_url:
-                # Download PDF using requests
-                print(f"Downloading PDF from: {pdf_url}")
-                response = requests.get(pdf_url)
+            # Check for multiple types of download elements
+            download_selectors = [
+                "//a[contains(@href, '.pdf')]",
+                "//button[contains(text(), 'Download')]",
+                "//a[contains(text(), 'PDF')]",
+                "//a[contains(text(), 'Download')]",
+                "//button[contains(text(), 'Unduh')]",
+                "//a[contains(text(), 'Unduh')]",  # Indonesian for download
+                "//input[@type='button'][contains(@value, 'Download')]",
+                "//input[@type='button'][contains(@value, 'Unduh')]"
+            ]
 
-                # Save PDF
-                filename = f"./downloads/presensi_{int(time.time())}.pdf"
-                with open(filename, 'wb') as f:
-                    f.write(response.content)
+            presensi_link = None
+            for selector in download_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    for element in elements:
+                        if element and element.is_displayed():
+                            presensi_link = element
+                            print(f"Found download element with selector: {selector}")
+                            break
+                    if presensi_link:
+                        break
+                except:
+                    continue
 
-                print(f"PDF saved as: {filename}")
-                return filename
+            if not presensi_link:
+                # Try to find any link that might trigger PDF download
+                all_links = self.driver.find_elements(By.TAG_NAME, "a")
+                for link in all_links:
+                    if link.is_displayed():
+                        href = link.get_attribute('href') or ''
+                        text = link.text.strip().lower()
+                        if ('presensi' in href.lower() or 'pdf' in href.lower() or
+                            'download' in text or 'unduh' in text or 'pdf' in text):
+                            presensi_link = link
+                            print(f"Found potential download link: {href} - {text}")
+                            break
+
+            if presensi_link:
+                # Get PDF URL
+                pdf_url = presensi_link.get_attribute('href')
+                if pdf_url:
+                    print(f"Found PDF URL: {pdf_url}")
+
+                    # Use session cookies for authenticated download
+                    cookies = self.driver.get_cookies()
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': presensi_url
+                    }
+
+                    # Add cookies to headers
+                    for cookie in cookies:
+                        headers[f"Cookie-{cookie['name']}"] = cookie['value']
+
+                    print(f"Attempting download with headers: {list(headers.keys())}")
+
+                    try:
+                        # Download PDF with longer timeout and SSL verification disabled
+                        import urllib3
+                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+                        response = requests.get(pdf_url, headers=headers, timeout=30, verify=False)
+
+                        if response.status_code == 200:
+                            # Check if it's actually PDF content
+                            content_type = response.headers.get('content-type', '')
+                            if 'pdf' in content_type or response.content.startswith(b'%PDF'):
+                                filename = f"./downloads/presensi_{int(time.time())}.pdf"
+                                with open(filename, 'wb') as f:
+                                    f.write(response.content)
+                                print(f"✓ PDF saved as: {filename} ({len(response.content)} bytes)")
+                                return filename
+                            else:
+                                print(f"Response is not PDF content-type: {content_type}")
+                                # Save as HTML for debugging
+                                html_filename = f"./downloads/presensi_response_{int(time.time())}.html"
+                                with open(html_filename, 'w', encoding='utf-8') as f:
+                                    f.write(response.text)
+                                print(f"Response saved as HTML: {html_filename}")
+                        else:
+                            print(f"HTTP Error {response.status_code}: {response.text[:200]}")
+
+                    except requests.exceptions.RequestException as e:
+                        print(f"Download failed with requests: {e}")
+                        # Fallback to browser click
+                        print("Falling back to browser-based download...")
+                else:
+                    # If it's a button, click it to trigger download
+                    print("No href found, clicking button to trigger download...")
+                    presensi_link.click()
+                    time.sleep(10)  # Wait longer for download
+                    print("PDF download attempted through browser click")
+
+                    # Check download directory
+                    import glob
+                    pdf_files = glob.glob("./downloads/*.pdf")
+                    if pdf_files:
+                        latest_pdf = max(pdf_files, key=os.path.getctime)
+                        print(f"Found downloaded PDF: {latest_pdf}")
+                        return latest_pdf
             else:
-                # If it's a button, click it to trigger download
-                presensi_link.click()
-                time.sleep(5)
-                print("PDF download initiated through browser")
+                print("No download elements found")
+                # Save page source for debugging
+                debug_filename = f"./downloads/presensi_page_{int(time.time())}.html"
+                with open(debug_filename, 'w', encoding='utf-8') as f:
+                    f.write(self.driver.page_source)
+                print(f"Page source saved for debugging: {debug_filename}")
 
         except Exception as e:
-            print(f"Error downloading PDF: {e}")
-            return None
+            print(f"Error in PDF download process: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return None
 
     def extract_table_from_pdf(self, pdf_path):
         """Extract table data from downloaded PDF"""
@@ -1794,6 +1913,76 @@ class EcampuzAutomation:
             # Keep browser open for inspection (commented out for automatic testing)
             # input("Press Enter to close browser...")
             self.driver.quit()
+
+    def _extract_captcha_area_as_image(self, element):
+        """Extract captcha area as image for OCR processing"""
+        try:
+            # Get element's position and size
+            location = element.location
+            size = element.size
+
+            if not location or not size:
+                print("Cannot determine element position/size")
+                return None
+
+            # Take full page screenshot first
+            screenshot_path = f"./downloads/captcha_area_screenshot_{int(time.time())}.png"
+            self.driver.save_screenshot(screenshot_path)
+            print(f"Full screenshot saved: {screenshot_path}")
+
+            # Crop the captcha area from screenshot
+            from PIL import Image
+            with Image.open(screenshot_path) as screenshot:
+                # Calculate crop area with some padding
+                left = max(0, location['x'] - 10)
+                top = max(0, location['y'] - 10)
+                right = min(screenshot.width, location['x'] + size['width'] + 10)
+                bottom = min(screenshot.height, location['y'] + size['height'] + 10)
+
+                # Crop the captcha area
+                captcha_image = screenshot.crop((left, top, right, bottom))
+
+                # Save cropped captcha
+                cropped_path = f"./downloads/captcha_area_cropped_{int(time.time())}.png"
+                captcha_image.save(cropped_path)
+                print(f"Captcha area cropped and saved: {cropped_path}")
+
+                # Also save as PDF for manual solving
+                pdf_path = f"./downloads/captcha_area_manual_{int(time.time())}.pdf"
+                captcha_image.save(pdf_path, "PDF", resolution=150.0)
+                print(f"Captcha area saved as PDF for manual solving: {pdf_path}")
+
+                return captcha_image
+
+        except Exception as e:
+            print(f"Error extracting captcha area as image: {e}")
+            return None
+
+    def _clean_distorted_text(self, text):
+        """Clean potentially distorted captcha text"""
+        if not text:
+            return ""
+
+        # Remove spaces that might be character separation
+        text = re.sub(r'\s+', '', text)
+
+        # Common character substitutions for distorted text
+        replacements = {
+            'O': '0', 'o': '0', 'Q': '0', 'q': '0',
+            'I': '1', 'i': '1', 'l': '1', 'L': '1',
+            'S': '5', 's': '5', 'Z': '2', 'z': '2',
+            'G': '6', 'g': '9', 'B': '8', 'b': '8',
+            '|': '1', '!': '1', '@': '2', '#': '3', '$': '4',
+            '%': '0', '^': '6', '&': '7', '*': '8',
+        }
+
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+
+        # Remove any remaining non-alphanumeric characters except spaces
+        text = re.sub(r'[^a-zA-Z0-9\s]', '', text)
+
+        return text
 
 def main():
     """Main function to run the automation"""
